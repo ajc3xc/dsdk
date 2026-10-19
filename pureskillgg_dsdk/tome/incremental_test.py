@@ -579,6 +579,8 @@ def test_extend_removes_what_an_earlier_build_left_unlisted(tmp_path, arrival):
         os.path.join(folder, "dataframe_00099"),
         os.path.join(folder, "keyset_00099"),
         os.path.join(folder, "tome.4242.tmp"),
+        os.path.join(folder, "rewrite_dataframe_00003"),
+        os.path.join(folder, "rewrite_keyset_00003"),
         os.path.join(folder, "header", "dataframe_00007"),
     ]
     for path in strays:
@@ -707,6 +709,89 @@ def test_extend_builds_a_channel_that_has_no_tome_yet(
         extended.tomes["round_end"].manifest["id"]
         == first.tomes["round_end"].manifest["id"]
     )
+
+
+def test_extend_publishes_a_new_channel_before_the_header(
+    tmp_path, arrival, monkeypatch
+):
+    # The header lists the matches, so it is written last: a stop after the header
+    # must never leave a channel that the header's matches need still unpublished.
+    curator = make_curator(tmp_path / "tomes", arrival.root)
+    build(curator, ["round_end"], tome_name=BASIC)
+    arrival.arrive()
+    order = []
+    real_publish, real_header = builder._Build._publish, builder._Build._commit_header
+
+    def publish(self, channel, scribe, name, staged_header=None):
+        order.append(("channel", channel))
+        return real_publish(self, channel, scribe, name, staged_header)
+
+    def commit_header(self, header, state):
+        order.append(("header", None))
+        return real_header(self, header, state)
+
+    monkeypatch.setattr(builder._Build, "_publish", publish)
+    monkeypatch.setattr(builder._Build, "_commit_header", commit_header)
+    build(curator, tome_name=BASIC, behavior_if_complete="extend")
+
+    kinds = [kind for kind, _ in order]
+    assert ("channel", "player_death") in order
+    assert kinds.index("channel") < kinds.index("header")
+
+
+def test_extend_stopped_between_the_header_files_is_repaired_by_the_next_run(
+    tmp_path, arrival, drift_collection, monkeypatch
+):
+    # The header's page 0 is replaced file by file (rows, then keyset). A stop
+    # between the two must leave a collection that the next extension repairs.
+    reference = build(
+        make_curator(tmp_path / "reference", drift_collection), tome_name=BASIC
+    )
+    curator = make_curator(tmp_path / "tomes", arrival.root)
+    build(curator, tome_name=BASIC)
+    arrival.arrive()
+    real_replace = builder.replace_file
+
+    def stop_before_the_keyset(source, destination, *args, **kwargs):
+        if os.path.basename(str(destination)) == "keyset_00000" and "header" in str(
+            destination
+        ):
+            raise RuntimeError("stopped between the header files")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(builder, "replace_file", stop_before_the_keyset)
+    with pytest.raises(RuntimeError, match="stopped between the header files"):
+        build(curator, tome_name=BASIC, behavior_if_complete="extend")
+    monkeypatch.setattr(builder, "replace_file", real_replace)
+
+    repaired = build(curator, tome_name=BASIC, behavior_if_complete="extend")
+    assert_same_collection(repaired, reference)
+
+
+def test_extend_stopped_after_the_channels_and_before_the_header_is_repaired(
+    tmp_path, arrival, drift_collection, monkeypatch
+):
+    # The channels are committed first and the header last. A stop in between
+    # leaves the header without the new matches (the list is the header's);
+    # the next extension adds them to the header and not to the channels again.
+    reference = build(
+        make_curator(tmp_path / "reference", drift_collection), tome_name=BASIC
+    )
+    curator = make_curator(tmp_path / "tomes", arrival.root)
+    build(curator, tome_name=BASIC)
+    arrival.arrive()
+    real_commit_header = builder._Build._commit_header
+
+    def stop(self, header, state):
+        raise RuntimeError("stopped before the header")
+
+    monkeypatch.setattr(builder._Build, "_commit_header", stop)
+    with pytest.raises(RuntimeError, match="stopped before the header"):
+        build(curator, tome_name=BASIC, behavior_if_complete="extend")
+    monkeypatch.setattr(builder._Build, "_commit_header", real_commit_header)
+
+    repaired = build(curator, tome_name=BASIC, behavior_if_complete="extend")
+    assert_same_collection(repaired, reference)
 
 
 def test_extend_widens_what_the_old_pages_hold(tmp_path):

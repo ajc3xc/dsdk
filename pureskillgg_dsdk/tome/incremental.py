@@ -50,7 +50,7 @@ from .constants import get_page_path_fs
 SIGNATURES_FIELD = "signatures"
 RESUME_FIELD = "resume"
 
-_PAGE_FILE = re.compile(r"^(?:dataframe|keyset)_\d{5}$")
+_PAGE_FILE = re.compile(r"^(?:rewrite_)?(?:dataframe|keyset)_\d{5}$")  # rewrite_ is the staged copy of a page the narrowing changed
 _INDEX_COLUMN = "__index_level_0__"
 _KEYSET_COLUMN = "_"
 

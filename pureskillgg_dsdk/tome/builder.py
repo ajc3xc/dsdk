@@ -529,8 +529,13 @@ class _Build:
             )
         return state
 
-    def _publish(self, channel, scribe, name):
-        """Move a channel's staged tome to its name, with its header copy."""
+    def _publish(self, channel, scribe, name, staged_header=None):
+        """
+        Move a channel's staged tome to its name, with its header copy. An
+        extension publishes before the header is committed, so its header copy
+        is taken from the staged header (``staged_header``), not from the one
+        on disk, which still lacks the new matches.
+        """
         if scribe.key_count == 0:
             self._log.info("Channel in no matches: no tome", channel=channel)
             return
@@ -546,7 +551,10 @@ class _Build:
         # pages are half old and half new.
         self._writer.write_manifest(dict(final, isComplete=False, pages=[]))
         pages = [self._move_page(page, name) for page in manifest["pages"]]
-        self._copy_header(name, scribe.keys)
+        if staged_header is None:
+            self._copy_header(name, scribe.keys)
+        else:
+            self._write_header_copy(name, scribe.keys, staged_header)
         self._writer.write_manifest(dict(final, pages=pages))
 
     def _move_page(self, page, name) -> dict:
@@ -658,12 +666,14 @@ class _Build:
             self._commit_extension(
                 channel, scribe, names[channel], extend[channel], header
             )
-        if added > 0:
-            self._commit_header(header, header_state)
+        # Channels first, the header last (see the docstring): a build that stops
+        # after a channel is published finds the header still missing its matches.
         for channel in build:
-            self._publish(channel, scribes[channel], names[channel])
+            self._publish(channel, scribes[channel], names[channel], staged_header=header)
             if channel in built:
                 self._tidy_published(names[channel])
+        if added > 0:
+            self._commit_header(header, header_state)
         self._remove_staging()
         self._log.info(
             "Extend Basic Tomes Done",
@@ -862,6 +872,9 @@ class _Build:
         staged = header.manifest
         if len(state.pages) == 1 and state.pages[0]["number"] == 0:
             pages = list(state.pages)
+            # The rows first, the keyset (the list of matches) last. A stop between
+            # the two leaves the old list, so the next extension adds the matches
+            # again and rewrites the rows; it never leaves a listed match without rows.
             for subtype in ("dataframe", "keyset"):
                 replace_file(
                     get_page_path_fs(self._tome_root, subtype, staged["pages"][0]),
